@@ -20,6 +20,7 @@ import {
   MachineInterpreter as MMOMachineInterpreter,
   SceneId,
 } from "../mmoMachine";
+import { Player } from "../types/Room";
 
 type SceneTransitionData = {
   previousSceneId: SceneId;
@@ -67,6 +68,7 @@ export abstract class BaseScene extends Phaser.Scene {
 
   private joystick?: VirtualJoystick;
   private sceneTransitionData?: SceneTransitionData;
+  private switchToScene?: SceneId;
   private options: Required<BaseSceneOptions>;
 
   public map: Phaser.Tilemaps.Tilemap = {} as Phaser.Tilemaps.Tilemap;
@@ -191,8 +193,11 @@ export abstract class BaseScene extends Phaser.Scene {
         farmId: Number(this.gameService.state.context.state.id),
         isCurrentPlayer: true,
         // gameService
-        clothing: this.gameService.state.context.state.bumpkin
-          ?.equipped as BumpkinParts,
+        clothing: {
+          ...(this.gameService.state.context.state.bumpkin
+            ?.equipped as BumpkinParts),
+          updatedAt: 0,
+        },
       });
 
       this.initialiseCamera();
@@ -317,48 +322,11 @@ export abstract class BaseScene extends Phaser.Scene {
       }
     });
 
-    const removeCreatePlayerListener = server.state.players.onAdd(
-      (player, sessionId: string) => {
-        if (sessionId !== server.sessionId) {
-          this.playerEntities[sessionId] = this.createPlayer({
-            x: player.x,
-            y: player.y,
-            farmId: player.farmId,
-            clothing: player.clothing,
-            isCurrentPlayer: sessionId === server.sessionId,
-            npc: player.npc,
-          });
-        }
-
-        let clothingChangedAt = 0;
-        const removeChangeClothingListener = player.onChange(() => {
-          if (clothingChangedAt !== player.clothing.updatedAt) {
-            clothingChangedAt = player.clothing.updatedAt;
-
-            if (this.playerEntities[sessionId]) {
-              this.playerEntities[sessionId].changeClothing(player.clothing);
-            } else if (sessionId === server.sessionId) {
-              this.currentPlayer?.changeClothing(player.clothing);
-            }
-          }
-        });
-
-        this.events.on("shutdown", () => {
-          removeChangeClothingListener();
-        });
-      }
-    );
-
-    server.state.players.onRemove((_player: any, sessionId: string) => {
-      this.destroyPlayer(sessionId);
-    });
-
     // send the scene player is in
     // this.room.send()
 
     this.events.on("shutdown", () => {
       removeMessageListener();
-      removeCreatePlayerListener();
     });
   }
 
@@ -427,7 +395,7 @@ export abstract class BaseScene extends Phaser.Scene {
     x: number;
     y: number;
     farmId: number;
-    clothing: BumpkinParts;
+    clothing: Player["clothing"];
     npc?: NPCName;
   }): BumpkinContainer {
     const defaultClick = () => {
@@ -492,18 +460,11 @@ export abstract class BaseScene extends Phaser.Scene {
           const warpTo = (obj2 as any).data?.list?.warp;
           if (warpTo) {
             this.cameras.main.fadeOut(1000);
-            (
-              this.currentPlayer?.body as Physics.Arcade.Body | undefined
-            )?.destroy();
 
             this.cameras.main.on(
               "camerafadeoutcomplete",
               () => {
-                const data: SceneTransitionData = {
-                  previousSceneId: this.sceneId,
-                };
-
-                this.scene.start(warpTo, data);
+                this.switchToScene = warpTo;
               },
               this
             );
@@ -673,16 +634,50 @@ export abstract class BaseScene extends Phaser.Scene {
     // this.cameras.main.setScroll(this.currentPlayer.x, this.currentPlayer.y);
   }
 
-  updateOtherPlayers() {
+  syncPlayers() {
     const server = this.mmoService.state.context.server;
     if (!server) return;
 
     // Destroy any dereferenced players
     Object.keys(this.playerEntities).forEach((sessionId) => {
-      if (!server.state.players.get(sessionId)) {
-        this.destroyPlayer(sessionId);
+      if (!server.state.players.get(sessionId)) this.destroyPlayer(sessionId);
+      if (!this.playerEntities[sessionId].active) this.destroyPlayer(sessionId);
+    });
+
+    // Create new players
+    server.state.players.forEach((player, sessionId) => {
+      // Skip the current player
+      if (sessionId === server.sessionId) return;
+
+      if (!this.playerEntities[sessionId]) {
+        this.playerEntities[sessionId] = this.createPlayer({
+          x: player.x,
+          y: player.y,
+          farmId: player.farmId,
+          clothing: player.clothing,
+          isCurrentPlayer: sessionId === server.sessionId,
+        });
       }
     });
+  }
+
+  updateClothing() {
+    const server = this.mmoService.state.context.server;
+    if (!server) return;
+
+    // Update clothing
+    server.state.players.forEach((player, sessionId) => {
+      if (this.playerEntities[sessionId]) {
+        this.playerEntities[sessionId].changeClothing(player.clothing);
+      } else if (sessionId === server.sessionId) {
+        this.currentPlayer?.changeClothing(player.clothing);
+      }
+    });
+  }
+
+  renderPlayers() {
+    const server = this.mmoService.state.context.server;
+    if (!server) return;
 
     // Render current players
     server.state.players.forEach((player, sessionId) => {
@@ -714,6 +709,22 @@ export abstract class BaseScene extends Phaser.Scene {
     });
   }
 
+  switchScene() {
+    if (this.switchToScene) {
+      const warpTo = this.switchToScene;
+      this.switchToScene = undefined;
+      this.scene.start(warpTo, { previousSceneId: this.sceneId });
+    }
+  }
+  updateOtherPlayers() {
+    const server = this.mmoService.state.context.server;
+    if (!server) return;
+
+    this.syncPlayers();
+    this.updateClothing();
+    this.renderPlayers();
+  }
+
   initialiseNPCs(npcs: NPCBumpkin[]) {
     npcs.forEach((bumpkin, index) => {
       const defaultClick = () => {
@@ -733,7 +744,10 @@ export abstract class BaseScene extends Phaser.Scene {
         scene: this,
         x: bumpkin.x,
         y: bumpkin.y,
-        clothing: bumpkin.clothing ?? NPC_WEARABLES[bumpkin.npc],
+        clothing: {
+          ...(bumpkin.clothing ?? NPC_WEARABLES[bumpkin.npc]),
+          updatedAt: 0,
+        },
         onClick: bumpkin.onClick ?? defaultClick,
         name: bumpkin.npc,
       });
@@ -753,6 +767,7 @@ export abstract class BaseScene extends Phaser.Scene {
   fixedTick(time: number, delta: number) {
     this.currentTick++;
 
+    this.switchScene();
     this.updatePlayer();
     this.updateOtherPlayers();
   }
