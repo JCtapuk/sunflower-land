@@ -12,7 +12,11 @@ const testnetFeatureFlag = () => CONFIG.NETWORK === "mumbai";
  *
  * Do not delete JEST_TEST.
  */
-type FeatureName = "JEST_TEST" | "PUMPKIN_PLAZA" | "POTION_HOUSE";
+type FeatureName =
+  | "JEST_TEST"
+  | "PUMPKIN_PLAZA"
+  | "POTION_HOUSE"
+  | "CRYPTO_COM_WALLET";
 
 type FeatureFlag = (inventory: GameState["inventory"]) => boolean;
 
@@ -20,6 +24,7 @@ const featureFlags: Record<FeatureName, FeatureFlag> = {
   JEST_TEST: defaultFeatureFlag,
   PUMPKIN_PLAZA: defaultFeatureFlag,
   POTION_HOUSE: testnetFeatureFlag,
+  CRYPTO_COM_WALLET: testnetFeatureFlag,
 };
 
 export const hasFeatureAccess = (
